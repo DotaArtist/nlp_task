@@ -4,6 +4,7 @@
 
 __author__ = 'yp'
 
+# TODO
 
 import os
 import time
@@ -11,6 +12,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
+from apex import amp
 from torch.optim import Optimizer
 from transformers.modeling_albert import AlbertModel, AlbertPreTrainedModel
 from transformers.configuration_albert import AlbertConfig
@@ -200,8 +202,8 @@ class Lamb(Optimizer):
 
 MAX_LENGTH = 512
 LEARNING_RATE = 0.001
-EPOCH = 40
-BATCH_SIZE = 2
+EPOCH = 20
+BATCH_SIZE = 8
 MAX_GRAD_NORM = 1.0
 
 print(torch.cuda.is_available())
@@ -213,13 +215,22 @@ feat_map = {"input_ids": "int",
             "masked_lm_positions": "int",
             "masked_lm_ids": "int"}
 
-pretrain_file = 'd:/data_file/medical_data/tfrecord/medical_data_train_00000'
+pretrain_file = 'd:/data_file/medical_data/tfrecord/medical_data_train_sample'
 
 # Create albert pretrain model
 config = AlbertConfig.from_json_file("D:/model_file/my_albert/config.json")
 albert_pretrain = AlbertForPretrain(config)
+
+if torch.cuda.is_available():
+    albert_pretrain.cuda()
+    print(albert_pretrain.device)
+
 # Create optimizer
 optimizer = Lamb([{"params": [p for n, p in list(albert_pretrain.named_parameters())]}], lr=LEARNING_RATE)
+
+# FP16
+albert_pretrain, optimizer = amp.initialize(albert_pretrain, optimizer, opt_level="O1")
+
 albert_pretrain.train()
 dataset = TFRecordDataset(pretrain_file, index_path=None, description=feat_map)
 loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, drop_last=True)
@@ -257,11 +268,11 @@ for e in range(epoch + 1, EPOCH):
         b_attention_mask = torch.tensor(b_attention_mask).long()
         b_masked_lm_labels = torch.tensor(b_masked_lm_labels).long()
 
-        loss = albert_pretrain(input_ids=b_input_ids
-                               , attention_mask=b_attention_mask
-                               , token_type_ids=b_token_type_ids
-                               , masked_lm_labels=b_masked_lm_labels
-                               , seq_relationship_labels=b_seq_relationship_labels)
+        loss = albert_pretrain(input_ids=b_input_ids.cuda()
+                               , attention_mask=b_attention_mask.cuda()
+                               , token_type_ids=b_token_type_ids.cuda()
+                               , masked_lm_labels=b_masked_lm_labels.cuda()
+                               , seq_relationship_labels=b_seq_relationship_labels.cuda())
 
         # clears old gradients
         optimizer.zero_grad()
