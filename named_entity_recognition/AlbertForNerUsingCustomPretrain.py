@@ -245,3 +245,20 @@ checkpoint = torch.load("D:/model_file/my_albert/pretrain_checkpoint")
 albert_pretrain.load_state_dict(checkpoint['model_state_dict'])
 
 model_tokenclassification = AlbertForTokenClassification(albert_pretrain.albert, config)
+
+from torch.optim import Adam
+LEARNING_RATE = 0.0000003
+FULL_FINETUNING = True
+if FULL_FINETUNING:
+    param_optimizer = list(model_tokenclassification.named_parameters())
+    no_decay = ['bias', 'gamma', 'beta']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+         'weight_decay_rate': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
+         'weight_decay_rate': 0.0}
+    ]
+else:
+    param_optimizer = list(model_tokenclassification.classifier.named_parameters())
+    optimizer_grouped_parameters = [{"params": [p for n, p in param_optimizer]}]
+optimizer = Adam(optimizer_grouped_parameters, lr=LEARNING_RATE)
