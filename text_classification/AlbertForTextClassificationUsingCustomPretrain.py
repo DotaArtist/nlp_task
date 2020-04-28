@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""albert 文本分类"""
+"""albert custom pretrain 文本分类"""
 
 __author__ = 'yp'
 
@@ -10,13 +10,16 @@ import time
 import datetime
 import numpy as np
 import pandas as pd
+import torch.nn as nn
 from transformers import *
-from torch.utils.data import random_split
-from torch.nn.functional import softmax
+from torch.nn.modules.loss import MSELoss
+from torch.optim import Optimizer
+from transformers.modeling_bert import ACT2FN
+from torch.nn import CrossEntropyLoss
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import get_linear_schedule_with_warmup
-from transformers import AlbertForSequenceClassification
+
 
 lab_map = {
     0: 1,
@@ -37,15 +40,239 @@ def flat_accuracy(preds, labels):
     return np.sum(pred_flat == labels_flat) / len(labels_flat)
 
 
-pretrained = 'D:/model_file/voidful_albert_chinese_tiny'
-# pretrained = 'D:/model_file/albert_tiny'
-config = AlbertConfig.from_pretrained(pretrained)
-tokenizer = BertTokenizer.from_pretrained(pretrained)
-model = AlbertForSequenceClassification.from_pretrained(
-    pretrained,
-    num_labels=3, output_attentions=False,
-    output_hidden_states=False)
+class AlbertSequenceOrderHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, 2)
+        self.bias = nn.Parameter(torch.zeros(2))
 
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        prediction_scores = hidden_states + self.bias
+
+        return prediction_scores
+
+
+class AlbertForPretrain(AlbertPreTrainedModel):
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.albert = AlbertModel(config)
+
+        # For Masked LM
+        # The original huggingface implementation, created new output weights via dense layer
+        # However the original Albert
+        self.predictions_dense = nn.Linear(config.hidden_size, config.embedding_size)
+        self.predictions_activation = ACT2FN[config.hidden_act]
+        self.predictions_LayerNorm = nn.LayerNorm(config.embedding_size)
+        self.predictions_bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.predictions_decoder = nn.Linear(config.embedding_size, config.vocab_size)
+
+        self.predictions_decoder.weight = self.albert.embeddings.word_embeddings.weight
+
+        # For sequence order prediction
+        self.seq_relationship = AlbertSequenceOrderHead(config)
+
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            masked_lm_labels=None,
+            seq_relationship_labels=None,
+    ):
+
+        outputs = self.albert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+        )
+
+        loss_fct = CrossEntropyLoss()
+
+        sequence_output = outputs[0]
+
+        sequence_output = self.predictions_dense(sequence_output)
+        sequence_output = self.predictions_activation(sequence_output)
+        sequence_output = self.predictions_LayerNorm(sequence_output)
+        prediction_scores = self.predictions_decoder(sequence_output)
+
+        if masked_lm_labels is not None:
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size)
+                                      , masked_lm_labels.view(-1))
+
+        pooled_output = outputs[1]
+        seq_relationship_scores = self.seq_relationship(pooled_output)
+        if seq_relationship_labels is not None:
+            seq_relationship_loss = loss_fct(seq_relationship_scores.view(-1, 2), seq_relationship_labels.view(-1))
+
+        loss = masked_lm_loss + seq_relationship_loss
+
+        return loss
+
+
+class Lamb(Optimizer):
+    r"""Implements Lamb algorithm.
+    It has been proposed in `Large Batch Optimization for Deep Learning: Training BERT in 76 minutes`_.
+    Arguments:
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        lr (float, optional): learning rate (default: 1e-3)
+        betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square (default: (0.9, 0.999))
+        eps (float, optional): term added to the denominator to improve
+            numerical stability (default: 1e-8)
+        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
+        adam (bool, optional): always use trust ratio = 1, which turns this into
+            Adam. Useful for comparison purposes.
+    .. _Large Batch Optimization for Deep Learning: Training BERT in 76 minutes:
+        https://arxiv.org/abs/1904.00962
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-6,
+                 weight_decay=0, adam=False):
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay)
+        self.adam = adam
+        super(Lamb, self).__init__(params, defaults)
+
+    def step(self, closure=None):
+        """Performs a single optimization step.
+        Arguments:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError('Lamb does not support sparse gradients, consider SparseAdam instad.')
+
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    # Exponential moving average of squared gradient values
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                state['step'] += 1
+
+                # Decay the first and second moment running average coefficient
+                # m_t
+                exp_avg.mul_(beta1).add_(1 - beta1, grad)
+                # v_t
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+
+                # Paper v3 does not use debiasing.
+                # bias_correction1 = 1 - beta1 ** state['step']
+                # bias_correction2 = 1 - beta2 ** state['step']
+                # Apply bias to lr to avoid broadcast.
+                step_size = group['lr']  # * math.sqrt(bias_correction2) / bias_correction1
+
+                weight_norm = p.data.pow(2).sum().sqrt().clamp(0, 10)
+
+                adam_step = exp_avg / exp_avg_sq.sqrt().add(group['eps'])
+                if group['weight_decay'] != 0:
+                    adam_step.add_(group['weight_decay'], p.data)
+
+                adam_norm = adam_step.pow(2).sum().sqrt()
+                if weight_norm == 0 or adam_norm == 0:
+                    trust_ratio = 1
+                else:
+                    trust_ratio = weight_norm / adam_norm
+                state['weight_norm'] = weight_norm
+                state['adam_norm'] = adam_norm
+                state['trust_ratio'] = trust_ratio
+                if self.adam:
+                    trust_ratio = 1
+
+                p.data.add_(-step_size * trust_ratio, adam_step)
+
+        return loss
+
+
+class AlbertForTextClassification(AlbertPreTrainedModel):
+    def __init__(self, bert, config, num_labels):
+        super().__init__(config)
+        self.num_labels = num_labels
+        self.albert = bert
+        self.dropout = nn.Dropout(config.classifier_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, self.num_labels)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+    ):
+        outputs = self.albert(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+        )
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        outputs = (logits,) + outputs[2:]  # add hidden states and attention if they are here
+
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            outputs = (loss,) + outputs
+
+        return outputs  # (loss), logits, (hidden_states), (attentions)
+
+pretrained = 'D:/model_file/my_albert'
+config = AlbertConfig.from_json_file("D:/model_file/my_albert/config.json")
+tokenizer = BertTokenizer.from_pretrained(pretrained)
+albert_pretrain = AlbertForPretrain(config)
+
+checkpoint = torch.load("D:/model_file/my_albert/pretrain_checkpoint")
+albert_pretrain.load_state_dict(checkpoint['model_state_dict'])
+
+model = AlbertForTextClassification(albert_pretrain.albert, config, num_labels=3)
 model.cuda()
 
 if torch.cuda.is_available():
@@ -57,19 +284,6 @@ else:
     print('No GPU available, using the CPU instead.')
     device = torch.device("cpu")
 
-# demo
-# inputtext = "今天[MASK]情很好"
-# maskpos = tokenizer.encode(inputtext, add_special_tokens=True).index(103)
-# input_ids = torch.tensor(tokenizer.encode(inputtext, add_special_tokens=True)).unsqueeze(0)  # Batch size 1
-# outputs = model(input_ids, masked_lm_labels=input_ids)
-# loss, prediction_scores = outputs[:2]
-# logit_prob = softmax(prediction_scores[0, maskpos]).data.tolist()
-# predicted_index = torch.argmax(prediction_scores[0, maskpos]).item()
-# predicted_k_indexes = torch.topk(prediction_scores[0, maskpos, :], k=3)
-# predicted_token = tokenizer.convert_ids_to_tokens([predicted_index])[0]
-# print(predicted_token, logit_prob[predicted_index])
-
-# Load the dataset into a pandas dataframe.
 train_df = pd.read_csv("d:/data_file/sentiment-data/train_3w.txt", delimiter='\t', header=None,
                        names=['num_id', 'label', 'sentence'])
 test_df = pd.read_csv("d:/data_file/sentiment-data/test_5k.txt", delimiter='\t', header=None,
