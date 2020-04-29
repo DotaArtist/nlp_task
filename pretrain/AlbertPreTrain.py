@@ -202,8 +202,8 @@ class Lamb(Optimizer):
 
 MAX_LENGTH = 512
 LEARNING_RATE = 0.001
-EPOCH = 20
-BATCH_SIZE = 8
+EPOCH = 40
+BATCH_SIZE = 48
 MAX_GRAD_NORM = 1.0
 
 print(torch.cuda.is_available())
@@ -215,10 +215,10 @@ feat_map = {"input_ids": "int",
             "masked_lm_positions": "int",
             "masked_lm_ids": "int"}
 
-pretrain_file = 'd:/data_file/medical_data/tfrecord/medical_data_train_sample'
+pretrain_file = './medical_data_train_00000'
 
 # Create albert pretrain model
-config = AlbertConfig.from_json_file("D:/model_file/my_albert/config.json")
+config = AlbertConfig.from_json_file("e:/model_file/my_albert/config.json")
 albert_pretrain = AlbertForPretrain(config)
 
 if torch.cuda.is_available():
@@ -229,7 +229,7 @@ if torch.cuda.is_available():
 optimizer = Lamb([{"params": [p for n, p in list(albert_pretrain.named_parameters())]}], lr=LEARNING_RATE)
 
 # FP16
-albert_pretrain, optimizer = amp.initialize(albert_pretrain, optimizer, opt_level="O1")
+albert_pretrain, optimizer = amp.initialize(albert_pretrain, optimizer, opt_level="O2")
 
 albert_pretrain.train()
 dataset = TFRecordDataset(pretrain_file, index_path=None, description=feat_map)
