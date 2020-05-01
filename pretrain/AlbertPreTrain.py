@@ -202,7 +202,7 @@ class Lamb(Optimizer):
 
 MAX_LENGTH = 512
 LEARNING_RATE = 0.001
-EPOCH = 40
+EPOCH_DELT = 40
 BATCH_SIZE = 48
 MAX_GRAD_NORM = 1.0
 
@@ -215,7 +215,7 @@ feat_map = {"input_ids": "int",
             "masked_lm_positions": "int",
             "masked_lm_ids": "int"}
 
-pretrain_file = './medical_data_train_00000'
+pretrain_file = './medical_data_tfrecord_00000'
 
 # Create albert pretrain model
 config = AlbertConfig.from_json_file("e:/model_file/my_albert/config.json")
@@ -250,6 +250,9 @@ if os.path.isfile('pretrain_checkpoint'):
 else:
     epoch = -1
     losses = []
+
+EPOCH = EPOCH_DELT + epoch + 1
+
 for e in range(epoch + 1, EPOCH):
     for batch in tqdm(loader):
         b_input_ids = batch['input_ids'].long()
