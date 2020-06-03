@@ -9,7 +9,7 @@ import json
 import numpy as np
 from transformers import XLNetTokenizer
 from transformers import AutoConfig
-from transformers import AutoModelForTokenClassification
+from transformers import XLNetForTokenClassification
 
 train_data = "D:/data_file/ccks2020_2_task1_train/task1_train.txt"
 model_path = "D:/model_file/hfl_chinese-xlnet-base"
@@ -34,7 +34,7 @@ def transform_entities_to_label(text, entities, sep_sentence):
 
 config = AutoConfig.from_pretrained(model_path)
 tokenizer = XLNetTokenizer.from_pretrained(model_path)
-model = AutoModelForTokenClassification.from_pretrained(model_path, num_labels=13)
+model = XLNetForTokenClassification.from_pretrained(model_path, num_labels=13)
 
 if torch.cuda.is_available():
     # Tell PyTorch to use the GPU.
