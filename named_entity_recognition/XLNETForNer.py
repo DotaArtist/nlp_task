@@ -97,13 +97,13 @@ config = AutoConfig.from_pretrained(model_path)
 tokenizer = XLNetTokenizer.from_pretrained(model_path, unk_token=unk_token)
 model = XLNetForTokenClassification.from_pretrained(model_path, num_labels=13)
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    print('There are %d GPU(s) available.' % torch.cuda.device_count())
-    print('We will use the GPU:', torch.cuda.get_device_name(0))
-else:
-    print('No GPU available, using the CPU instead.')
-    device = torch.device("cpu")
+# if torch.cuda.is_available():
+#     device = torch.device("cuda")
+#     print('There are %d GPU(s) available.' % torch.cuda.device_count())
+#     print('We will use the GPU:', torch.cuda.get_device_name(0))
+# else:
+#     print('No GPU available, using the CPU instead.')
+device = torch.device("cpu")
 
 model.to(device)
 
@@ -184,7 +184,7 @@ scheduler = get_linear_schedule_with_warmup(optimizer,
                                             num_training_steps=total_steps)
 
 # FP16
-model, optimizer = amp.initialize(model, optimizer, opt_level="O3")
+# model, optimizer = amp.initialize(model, optimizer, opt_level="O3")
 
 seed_val = 42
 
