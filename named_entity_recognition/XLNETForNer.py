@@ -277,7 +277,8 @@ for epoch_i in range(0, epochs):
         #   [1]: attention masks
         #   [2]: labels
         b_input_ids = batch[0].to(device)
-        b_labels = batch[2].to(device)
+        b_labels = batch[1].to(device)
+        b_masks = batch[2].to(device)
 
         # Tell pytorch not to bother with constructing the compute graph during
         # the forward pass, since this is only needed for backprop (training).
@@ -289,7 +290,7 @@ for epoch_i in range(0, epochs):
             # https://huggingface.co/transformers/v2.2.0/model_doc/bert.html#transformers.BertForSequenceClassification
             # Get the "logits" output by the model. The "logits" are the output
             # values prior to applying an activation function like the softmax.
-            (loss, logits) = model(b_input_ids, labels=b_labels)
+            (loss, logits) = model(b_input_ids, labels=b_labels, attention_mask=b_masks)
 
         # Accumulate the validation loss.
         total_eval_loss += loss.item()
