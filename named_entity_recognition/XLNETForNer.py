@@ -10,6 +10,7 @@ import time
 import torch
 import random
 import numpy as np
+from apex import amp
 from datetime import datetime
 from transformers import AdamW
 from transformers import AutoConfig
@@ -19,7 +20,7 @@ from transformers import get_linear_schedule_with_warmup
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-max_token_length = 1500
+max_token_length = 1000
 batch_size = 16
 epochs = 4
 
@@ -29,6 +30,17 @@ model_path = "D:/model_file/hfl_chinese-xlnet-base"
 label_dict = {'疾病和诊断': 1, '影像检查': 3, '解剖部位': 5, '手术': 7, '药物': 9, '实验室检验': 11}
 
 unk_token = '<unk>'
+
+
+def format_time(elapsed):
+    elapsed_rounded = int(round((elapsed)))
+    return str(datetime.timedelta(seconds=elapsed_rounded))
+
+
+def flat_accuracy(preds, labels):
+    pred_flat = np.argmax(preds, axis=1).flatten()
+    labels_flat = labels.flatten()
+    return np.sum(pred_flat == labels_flat) / len(labels_flat)
 
 
 def process_text(text):
@@ -51,26 +63,32 @@ def process_text(text):
 
 def transform_entities_to_label(text, entities, sep_sentence):
     """
+    原文，实体，wwm ===> 标签
     :param text: originalText
     :param entities: [{"start_pos": 10, "end_pos": 13, "label_type": "疾病和诊断"}]
     :param sep_sentence: [word, word]
     :return: [0, 0, 1, 0]
     """
     char_label = np.array([0 for i in range(len(text))])
-    out = np.array([0 for i in range(len(sep_sentence))])
+    out = np.array([0 for i in range(max_token_length)])
 
     for i in entities:
         char_label[i["start_pos"]:i["end_pos"]] = label_dict[i["label_type"]]
         char_label[i["end_pos"] - 1] = label_dict[i["label_type"]] + 1
 
     current_idx = 0
-    tmp = sep_sentence[1:-2]
-    for i, j in enumerate(tmp):
-        out[i] = max(char_label[current_idx:current_idx + len(j)])
-        if j != "<unk>":
-            current_idx = current_idx + len(j)
-        else:
+    pad_num = 0
+    while '<pad>' in sep_sentence:
+        sep_sentence.remove("<pad>")
+        pad_num += 1
+
+    for i, j in enumerate(sep_sentence[1:-2]):
+        out[i + pad_num + 1] = max(char_label[current_idx:current_idx + len(j)])
+
+        if j == "<unk>":
             current_idx = current_idx + 1
+        else:
+            current_idx = current_idx + len(j)
 
     return out.tolist()
 
@@ -87,8 +105,11 @@ else:
     print('No GPU available, using the CPU instead.')
     device = torch.device("cpu")
 
+model.to(device)
+
 train_input_ids = []
 train_labels = []
+train_masks = []
 
 with open(train_data, mode="r", encoding="utf-8") as f1:
     for line in f1.readlines():
@@ -106,13 +127,24 @@ with open(train_data, mode="r", encoding="utf-8") as f1:
         seq_lab = transform_entities_to_label(originalText, entities, sep_sentence)
         labels = torch.tensor(seq_lab).unsqueeze(0)
 
+        encoded_dict = tokenizer.encode_plus(
+            originalText,  # Sentence to encode.
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=max_token_length,  # Pad & truncate all sentences.
+            pad_to_max_length=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors='pt',  # Return pytorch tensors.
+        )
+
+        train_masks.append(encoded_dict["attention_mask"])
         train_input_ids.append(input_ids)
         train_labels.append(labels)
 
 train_input_ids = torch.cat(train_input_ids, dim=0)
-train_labels = torch.tensor(train_labels)
+train_labels = torch.cat(train_labels, dim=0)
+train_masks = torch.cat(train_masks, dim=0)
 
-train_dataset = TensorDataset(train_input_ids, train_labels)
+train_dataset = TensorDataset(train_input_ids, train_labels, train_masks)
 train_set, val_set = torch.utils.data.random_split(train_dataset, [950, 100])
 
 train_data_loader = DataLoader(
@@ -143,10 +175,7 @@ print('\n==== Output Layer ====\n')
 for p in params[-4:]:
     print("{:<55} {:>12}".format(p[0], str(tuple(p[1].size()))))
 
-optimizer = AdamW(model.parameters(),
-                  lr=2e-5,  # args.learning_rate - default is 5e-5, our notebook had 2e-5
-                  eps=1e-8  # args.adam_epsilon  - default is 1e-8.
-                  )
+optimizer = AdamW(model.parameters())
 
 total_steps = len(train_data_loader) * epochs
 
@@ -154,17 +183,8 @@ scheduler = get_linear_schedule_with_warmup(optimizer,
                                             num_warmup_steps=0,  # Default value in run_glue.py
                                             num_training_steps=total_steps)
 
-
-def format_time(elapsed):
-    elapsed_rounded = int(round((elapsed)))
-    return str(datetime.timedelta(seconds=elapsed_rounded))
-
-
-def flat_accuracy(preds, labels):
-    pred_flat = np.argmax(preds, axis=1).flatten()
-    labels_flat = labels.flatten()
-    return np.sum(pred_flat == labels_flat) / len(labels_flat)
-
+# FP16
+model, optimizer = amp.initialize(model, optimizer, opt_level="O3")
 
 seed_val = 42
 
@@ -200,15 +220,12 @@ for epoch_i in range(0, epochs):
             print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.'.format(step, len(train_data_loader), elapsed))
 
         b_input_ids = batch[0].to(device)
-        b_input_mask = batch[1].to(device)
-        b_labels = batch[2].to(device)
+        b_labels = batch[1].to(device)
+        b_input_mask = batch[2].to(device)
 
         model.zero_grad()
 
-        loss, logits = model(b_input_ids,
-                             token_type_ids=None,
-                             attention_mask=b_input_mask,
-                             labels=b_labels)
+        loss, logits = model(b_input_ids, labels=b_labels, attention_mask=b_input_mask)
 
         total_train_loss += loss.item()
 
@@ -272,10 +289,7 @@ for epoch_i in range(0, epochs):
             # https://huggingface.co/transformers/v2.2.0/model_doc/bert.html#transformers.BertForSequenceClassification
             # Get the "logits" output by the model. The "logits" are the output
             # values prior to applying an activation function like the softmax.
-            (loss, logits) = model(b_input_ids,
-                                   token_type_ids=None,
-                                   attention_mask=b_input_mask,
-                                   labels=b_labels)
+            (loss, logits) = model(b_input_ids, labels=b_labels)
 
         # Accumulate the validation loss.
         total_eval_loss += loss.item()
