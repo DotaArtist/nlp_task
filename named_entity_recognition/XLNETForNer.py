@@ -4,30 +4,51 @@
 
 __author__ = 'yp'
 
-
+import os
+import gc
 import json
 import time
 import torch
 import random
 import numpy as np
 from apex import amp
-from datetime import datetime
+import datetime
 from transformers import AdamW
 from transformers import AutoConfig
 from transformers import XLNetTokenizer
 from transformers import XLNetForTokenClassification
 from transformers import get_linear_schedule_with_warmup
 from torch.utils.data import TensorDataset
+from seqeval.metrics import classification_report, accuracy_score
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 max_token_length = 1000
-batch_size = 16
-epochs = 4
+batch_size = 1
+epochs = 1
 
-train_data = "D:/data_file/ccks2020_2_task1_train/task1_train.txt"
+# train_data = "D:/data_file/ccks2020_2_task1_train/task1_train.txt"
+train_data = "D:/data_file/ccks2020_2_task1_train/task1_train_demo.txt"
 model_path = "D:/model_file/hfl_chinese-xlnet-base"
+xlnet_out_address = "D:/model_file/my_xlnet"
+predict_mode = False
+predict_data = "D:/data_file/ccks2020_2_task1_train/task1_train_demo.txt"
 
 label_dict = {'疾病和诊断': 1, '影像检查': 3, '解剖部位': 5, '手术': 7, '药物': 9, '实验室检验': 11}
+label_map_reverse = {
+    0: 'O',
+    1: 'B-disease',
+    2: 'I-disease',
+    3: 'B-check',
+    4: 'I-check',
+    5: 'B-part',
+    6: 'I-part',
+    7: 'B-operation',
+    8: 'I-operation',
+    9: 'B-drug',
+    10: 'I-drug',
+    11: 'B-assay',
+    12: 'I-assay',
+}
 
 unk_token = '<unk>'
 
@@ -37,10 +58,18 @@ def format_time(elapsed):
     return str(datetime.timedelta(seconds=elapsed_rounded))
 
 
-def flat_accuracy(preds, labels):
-    pred_flat = np.argmax(preds, axis=1).flatten()
-    labels_flat = labels.flatten()
+def flat_accuracy(_preds, _labels):
+    pred_flat = np.argmax(_preds, axis=2).flatten()
+    labels_flat = _labels.flatten()
     return np.sum(pred_flat == labels_flat) / len(labels_flat)
+
+
+def get_label_name(_labels):
+    """
+    :param _labels: [[],[],[]]
+    :return:
+    """
+    return [[label_map_reverse[i] for i in j] for j in _labels]
 
 
 def process_text(text):
@@ -97,13 +126,13 @@ config = AutoConfig.from_pretrained(model_path)
 tokenizer = XLNetTokenizer.from_pretrained(model_path, unk_token=unk_token)
 model = XLNetForTokenClassification.from_pretrained(model_path, num_labels=13)
 
-# if torch.cuda.is_available():
-#     device = torch.device("cuda")
-#     print('There are %d GPU(s) available.' % torch.cuda.device_count())
-#     print('We will use the GPU:', torch.cuda.get_device_name(0))
-# else:
-#     print('No GPU available, using the CPU instead.')
-device = torch.device("cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print('There are %d GPU(s) available.' % torch.cuda.device_count())
+    print('We will use the GPU:', torch.cuda.get_device_name(0))
+else:
+    print('No GPU available, using the CPU instead.')
+# device = torch.device("cpu")
 
 model.to(device)
 
@@ -145,7 +174,8 @@ train_labels = torch.cat(train_labels, dim=0)
 train_masks = torch.cat(train_masks, dim=0)
 
 train_dataset = TensorDataset(train_input_ids, train_labels, train_masks)
-train_set, val_set = torch.utils.data.random_split(train_dataset, [950, 100])
+# train_set, val_set = torch.utils.data.random_split(train_dataset, [950, 100])
+train_set, val_set = torch.utils.data.random_split(train_dataset, [15, 5])
 
 train_data_loader = DataLoader(
     train_set,
@@ -184,7 +214,7 @@ scheduler = get_linear_schedule_with_warmup(optimizer,
                                             num_training_steps=total_steps)
 
 # FP16
-# model, optimizer = amp.initialize(model, optimizer, opt_level="O3")
+model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
 seed_val = 42
 
@@ -195,7 +225,6 @@ torch.cuda.manual_seed_all(seed_val)
 
 training_stats = []
 total_t0 = time.time()
-
 
 for epoch_i in range(0, epochs):
     print("")
@@ -241,6 +270,8 @@ for epoch_i in range(0, epochs):
         # Update the learning rate.
         scheduler.step()
 
+        gc.collect()
+
     # Calculate the average loss over all of the batches.
     avg_train_loss = total_train_loss / len(train_data_loader)
 
@@ -261,9 +292,11 @@ for epoch_i in range(0, epochs):
     model.eval()
 
     # Tracking variables
-    total_eval_accuracy = 0
     total_eval_loss = 0
     nb_eval_steps = 0
+
+    val_pred = []
+    val_lab = []
 
     # Evaluate data for one epoch
     for batch in val_data_loader:
@@ -299,13 +332,18 @@ for epoch_i in range(0, epochs):
         logits = logits.detach().cpu().numpy()
         label_ids = b_labels.to('cpu').numpy()
 
-        # Calculate the accuracy for this batch of test sentences, and
-        # accumulate it over all batches.
-        total_eval_accuracy += flat_accuracy(logits, label_ids)
+        val_pred.append(np.argmax(logits, axis=2).flatten().tolist())
+        val_lab.append(label_ids.flatten().tolist())
 
     # Report the final accuracy for this validation run.
-    avg_val_accuracy = total_eval_accuracy / len(val_data_loader)
+    val_pred_tag = get_label_name(val_pred)
+    val_lab_tag = get_label_name(val_lab)
+
+    avg_val_accuracy = accuracy_score(y_pred=val_pred_tag, y_true=val_lab_tag)
     print("  Accuracy: {0:.2f}".format(avg_val_accuracy))
+
+    val_class_report = classification_report(y_pred=val_pred_tag, y_true=val_lab_tag)
+    print("====class_report:", val_class_report)
 
     # Calculate the average loss over all of the batches.
     avg_val_loss = total_eval_loss / len(val_data_loader)
@@ -330,3 +368,42 @@ for epoch_i in range(0, epochs):
 
 print("Training complete!")
 print("Total training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
+
+print("save model!")
+if not os.path.exists(xlnet_out_address):
+        os.makedirs(xlnet_out_address)
+
+model_to_save = model.module if hasattr(model, 'module') else model
+output_model_file = os.path.join(xlnet_out_address, "pytorch_model.bin")
+output_config_file = os.path.join(xlnet_out_address, "config.json")
+
+torch.save(model_to_save.state_dict(), output_model_file)
+model_to_save.config.to_json_file(output_config_file)
+tokenizer.save_vocabulary(xlnet_out_address)
+
+
+if predict_mode:
+    model = XLNetForTokenClassification.from_pretrained(xlnet_out_address, num_labels=13)
+    tokenizer = XLNetTokenizer.from_pretrained(xlnet_out_address)
+    gc.collect()
+    model.to(device)
+
+    predict_input_ids = []
+    predict_masks = []
+
+    with open(predict_data, mode="r", encoding="utf-8") as f1:
+        for line in f1.readlines():
+            data = line.strip()
+
+            originalText = process_text(data)
+
+            input_ids = torch.tensor(
+                tokenizer.encode(originalText,
+                                 add_special_tokens=True,
+                                 pad_to_max_length=True,
+                                 max_length=max_token_length)).unsqueeze(0)
+            sep_sentence = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=False)
+            labels = torch.tensor([1] * input_ids.size(1)).unsqueeze(0)
+            outputs = model(input_ids.to(device), labels=labels.to(device))
+            print(np.argmax(outputs[1].detach().cpu().numpy(), axis=2).flatten())
+            gc.collect()
