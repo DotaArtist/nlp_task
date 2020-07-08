@@ -4,111 +4,141 @@
 
 __author__ = 'yp'
 
-
+import sklearn_crfsuite
+from sklearn.metrics import make_scorer
+from sklearn_crfsuite import scorers
+from sklearn_crfsuite import metrics
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import SGDClassifier
+from sklearn.linear_model import PassiveAggressiveClassifier
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import classification_report
+import scipy.stats
+from collections import Counter
+from sklearn.model_selection import RandomizedSearchCV
 from time import time
 import pickle
-import numpy as np
-
-from sklearn.metrics import make_scorer, f1_score
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn_crfsuite import metrics
-
-from crfsuite import sent2features, sent2labels, sent2tokens
-import scipy.stats
+import string
 
 
-class DataPreprocess:
-    def __init__(self, data_path, pre_tags, pre_tags_abbr):
-        """
-        data_path:str--->path of data
-        pre_tags:list--->tag which should be made
-        pre_tags_abbr:dict()--->abbreviation of pre_tags
-        """
-        self.data_path = data_path
-        self.pre_tags = pre_tags
-        self.pre_tags_abbr = pre_tags_abbr
+label_dict = {
+    'B-疾病和诊断': 'B-disease',
+    'B-影像检查': 'B-check',
+    'B-解剖部位': 'B-body',
+    'B-手术': 'B-operation',
+    'B-药物': 'B-drug',
+    'B-实验室检验': 'B-analysis',
+    'I-疾病和诊断': 'I-disease',
+    'I-影像检查': 'I-check',
+    'I-解剖部位': 'I-body',
+    'I-手术': 'I-operation',
+    'I-药物': 'I-drug',
+    'I-实验室检验': 'I-analysis',
+    'O-O': 'O',
+}
 
-    def process(self):
-        start_time = time()
-        data = []
-        with open(self.data_path, 'r', encoding='utf8') as f:
-            lines = f.readlines()
-            for line in lines:
-                sentence = []
-                sent_with_tag = line.split('\t')
-                words = sent_with_tag[0].strip()
-                tags = sent_with_tag[1].strip()
-                tags_init = ['O' for _ in range(len(words))]
-                word_with_tags = tags[tags.index(':') + 1:].strip()
-                if word_with_tags == 'null':
-                    pass
-                else:
-                    word_with_tag = word_with_tags.split('&&')
-                    for w_t in word_with_tag:
-                        try:
-                            tag = w_t.split('@@')[0]
-                            word = w_t.split('@@')[1]
-                        except Exception:
-                            #                             print('ner tag ERROR：{}'.format(line))
-                            break
-                        if tag in self.pre_tags:
-                            tag_abbr = self.pre_tags_abbr[tag]
-                        else:
-                            tag_abbr = 'O'
-                        cnt_word = words.count(word)
-                        pos = 0
-                        for i in range(cnt_word):
-                            pos = words.index(word, pos)
-                            for j in range(pos, pos + len(word)):
-                                if tag_abbr == 'O':
-                                    tags_init[j] = tag_abbr
-                                else:
-                                    if j == pos:
-                                        tags_init[j] = 'B-' + tag_abbr
-                                    else:
-                                        tags_init[j] = 'I-' + tag_abbr
-                for idx, char in enumerate(words):
-                    sentence.append((char, tags_init[idx]))
-                if len(sentence) == 0:
-                    print(line)
-                data.append(sentence)
-            end_time = time()
-            print('Data processing is over! It takes {} s.'.format(
-                '%.2f' % (end_time - start_time)))
-            return data
+lll = list(label_dict.values())
+lll.remove('O')
+
+punc = string.punctuation + '：，。？、“”'
 
 
-# 调参
-def tune_parameters():
-    labels = ['B-DIS', 'I-DIS', 'B-SYM', 'I-SYM', 'B-DIA', 'I-DIA', 'B-DRU', 'I-DRU', 'O']
-    crf = sklearn_crfsuite.CRF(algorithm='lbfgs',
-                               max_iterations=100,
-                               all_possible_transitions=True)
-    params_space = {
-        'c1': scipy.stats.expon(scale=0.5),
-        'c2': scipy.stats.expon(scale=0.05),
-        'all_possible_states': [True, False]
+class SentenceGetter(object):
+
+    def __init__(self, data):
+        self.n_sent = 1
+        self.data = data
+        self.empty = False
+        agg_func = lambda s: [(w, t) for w, t in zip(s['word'].values.tolist(),
+                                                     s['tag'].values.tolist())]
+        self.grouped = self.data.groupby('Sentence #').apply(agg_func)
+        self.sentences = [s for s in self.grouped]
+
+    def get_next(self):
+        try:
+            s = self.grouped['Sentence_{}'.format(self.n_sent)]
+            self.n_sent += 1
+            return s
+        except:
+            return None
+
+
+def get_vocab(_vocab, _type):
+    """
+    :param _vocab:
+    :param _type: 疾病和诊断,手术,药物,解剖部位,实验室检验,影像检查
+    :return:
+    """
+    tmp_vocab = _vocab[_vocab['类型'] == _type]['名称'].tolist()
+    _ = sorted(Counter(list("".join(tmp_vocab))).items(), key=lambda x: x[1], reverse=False)
+    return [i[0] for i in _]
+
+
+df = pd.read_csv('crf_train.txt',
+                 encoding="utf-8", sep='\t', header=None)
+df.columns = ['Sentence #', 'word', 'tag']
+df = df.fillna(method='ffill')
+
+getter = SentenceGetter(df)
+sentences = getter.sentences
+
+vocab = pd.read_excel('vocab.xlsx',
+                      sheet_name='vocab',
+                      index_col=None,
+                      header=0)
+
+
+drug_vocab = get_vocab(_vocab=vocab, _type='药物')
+body_vocab = get_vocab(_vocab=vocab, _type='解剖部位')
+analysis_vocab = get_vocab(_vocab=vocab, _type='实验室检验')
+check_vocab = get_vocab(_vocab=vocab, _type='影像检查')
+operation_vocab = get_vocab(_vocab=vocab, _type='手术')
+disease_vocab = get_vocab(_vocab=vocab, _type='疾病和诊断')
+
+
+def word2features_old(sent, i):
+    word = sent[i][0]
+
+    features = {
+        'bias': 1.0,
     }
-    f1_scorer = make_scorer(metrics.flat_f1_score,
-                            average='weighted',
-                            labels=labels)
-    rs = RandomizedSearchCV(crf,
-                            params_space,
-                            cv=10,
-                            verbose=1,
-                            n_jobs=-1,
-                            n_iter=100,
-                            scoring=f1_scorer)
-    rs.fit(X_train, y_train)
-    print('best params:', rs.best_params_)
-    print('best CV score:', rs.best_score_)
+    features.update({
+        '0:word.is_disease': 1. if word in disease_vocab else 0,
+        '0:word.is_drug': 1. if word in drug_vocab else 0,
+        '0:word.is_body': 1. if word in body_vocab else 0,
+        '0:word.is_analysis': 1. if word in analysis_vocab else 0,
+        '0:word.is_check': 1. if word in check_vocab else 0,
+        '0:word.is_operation': 1. if word in operation_vocab else 0,
+    })
+    if i > 0:
+        word1 = sent[i - 1][0]
+        features.update({
+            '-1:word.is_disease': 1. if word1 in disease_vocab else 0,
+            '-1:word.is_drug': 1. if word1 in drug_vocab else 0,
+            '-1:word.is_body': 1. if word1 in body_vocab else 0,
+            '-1:word.is_analysis': 1. if word1 in analysis_vocab else 0,
+            '-1:word.is_check': 1. if word1 in check_vocab else 0,
+            '-1:word.is_operation': 1. if word1 in operation_vocab else 0,
+        })
+    else:
+        features['BOS'] = 1.
+    if i < len(sent) - 1:
+        word1 = sent[i + 1][0]
+        features.update({
+            '+1:word.is_disease': 1. if word1 in disease_vocab else 0,
+            '+1:word.is_drug': 1. if word1 in drug_vocab else 0,
+            '+1:word.is_body': 1. if word1 in body_vocab else 0,
+            '+1:word.is_analysis': 1. if word1 in analysis_vocab else 0,
+            '+1:word.is_check': 1. if word1 in check_vocab else 0,
+            '+1:word.is_operation': 1. if word1 in operation_vocab else 0,
+        })
+    else:
+        features['EOS'] = 1.
 
-    # best params:{'all_possible_states': True, 'c1': 0.1697585004992326, 'c2': 0.01998358278071205}
-    # best CV score:0.929676333861697
-    # model size: 1.34M
+    return features
 
 
-# 训练、保存模型
 def train_and_save():
     print('Training...')
     start_time = time()
@@ -125,48 +155,122 @@ def train_and_save():
     # 保存模型:
     with open('mycrf.pickle', 'wb') as f:
         pickle.dump(crf, f)
-    model_path = 'mycrf.pickle'
-    return model_path
 
 
-# 评估
-def evaluate():
-    from crfsuite import tag_to_entity_all
-    with open('mycrf.pickle', 'rb') as f:
-        crf = pickle.load(f)
-    y_pred = crf.predict(X_test)
-    word_f1_score = metrics.flat_f1_score(y_test, y_pred, average='weighted', labels=crf.classes_)
-    cnt = 0
-    y_pred_entity = tag_to_entity_all(y_pred)
-    y_test_entity = tag_to_entity_all(y_test)
-    for i in range(len(y_pred_entity)):
-        if y_pred_entity[i] == y_test_entity[i]:
-            cnt += 1
-    sentence_accuracy = cnt / len(y_pred_entity)
-    print('sentence_accuracy: {}, word_f1_score: {}'.format(sentence_accuracy, word_f1_score))
-    # 0.6061830672863204 0.9325099689109188
+def word2features(sent, i):
+    """
+    处理每句中每个字
+    """
+    word = sent[i][0]
+    features = [
+        'bias',
+        'word=' + word,
+        #'word.ispunc=%s' % (word in punc),
+        #'word.isdigit=%s' % word.isdigit(),
+    ]
+    if i > 0:
+        word1 = sent[i - 1][0]
+        features.extend([
+            '-1:word=' + word1,
+         #   '-1:word.ispunc=%s' % (word1 in punc),
+         #   '-1:word.isdigit=%s' % word1.isdigit(),
+        ])
+        if i > 1:
+            word1 = sent[i - 2][0]
+            features.extend([
+                '-2:word=' + word1,
+          #      '-2:word.ispunc=%s' % (word1 in punc),
+           #     '-2:word.isdigit=%s' % word1.isdigit(),
+            ])
+
+    else:
+        features.append('BOS')
+
+    if i < len(sent) - 1:
+        word1 = sent[i + 1][0]
+        features.extend([
+            '+1:word=' + word1,
+            #'+1:word.ispunc=%s' % (word1 in punc),
+            #'+1:word.isdigit=%s' % word1.isdigit(),
+        ])
+        if i < len(sent) - 2:
+            word1 = sent[i + 2][0]
+            features.extend([
+                '+2:word=' + word1,
+             #   '+2:word.ispunc=%s' % (word1 in punc),
+              #  '+2:word.isdigit=%s' % word1.isdigit(),
+            ])
+    else:
+        features.append('EOS')
+    return features
 
 
-if __name__ == '__main__':
-    pre_tags = ['disease', 'symptom', 'diagnosis', 'drug']
-    pre_tags_abbr = {
-        'disease': 'DIS',
-        'symptom': 'SYM',
-        'diagnosis': 'DIA',
-        'drug': 'DRU',
-        'duration': 'DUR',
-        'start_time': 'STA',
-        'end_time': 'END'
+def sent2features(sent):
+    return [word2features(sent, i) for i in range(len(sent))]
+
+
+def sent2labels(sent):
+    return [label_dict[label] for token, label in sent]
+
+
+def sent2tokens(sent):
+    return [token for token, postag, label in sent]
+
+
+X = [sent2features(s) for s in sentences]
+y = [sent2labels(s) for s in sentences]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# crf = sklearn_crfsuite.CRF(
+#     algorithm='lbfgs',
+#     c1=0.1,
+#     c2=0.1,
+#     max_iterations=100,
+#     all_possible_transitions=True
+# )
+# crf.fit(X_train, y_train)
+#
+
+#
+# y_pred = crf.predict(X_test)
+# print(metrics.flat_f1_score(y_test, y_pred,
+#                             average='weighted',
+#                             labels=lll))
+#
+# print(metrics.flat_classification_report(y_test,
+#                                          y_pred,
+#                                          labels=lll))
+
+
+def tune_parameters():
+    params_space = {
+        'c1': scipy.stats.expon(scale=0.5),
+        'c2': scipy.stats.expon(scale=0.05),
+        'all_possible_states': [True, False]
     }
-    dataprocess = DataPreprocess('data/ner_all_3w.txt', pre_tags, pre_tags_abbr)
-    train_data = dataprocess.process()
+    crf = sklearn_crfsuite.CRF(
+        algorithm='lbfgs',
+        c1=0.1,
+        c2=0.1,
+        max_iterations=100,
+        all_possible_transitions=True
+    )
+    f1_scorer = make_scorer(metrics.flat_f1_score,
+                            average='weighted',
+                            labels=lll)
+    rs = RandomizedSearchCV(crf,
+                            params_space,
+                            cv=10,
+                            verbose=1,
+                            n_jobs=-1,
+                            n_iter=100,
+                            scoring=f1_scorer)
+    rs.fit(X_train, y_train)
+    print('best params:', rs.best_params_)
+    print('best CV score:', rs.best_score_)
 
-    X = [sent2features(s) for s in train_data]
-    y = [sent2labels(s) for s in train_data]
 
-    X_train, X_test, y_train, y_test = train_test_split(X,
-                                                        y,
-                                                        test_size=0.33,
-                                                        random_state=0)
-
-    # evaluate()
+def predict(crf, sentence):
+    _x = [sent2features(sentence)]
+    pred_tag = crf.predict(_x)
+    return pred_tag
