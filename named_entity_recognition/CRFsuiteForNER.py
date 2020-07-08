@@ -139,24 +139,6 @@ def word2features_old(sent, i):
     return features
 
 
-def train_and_save():
-    print('Training...')
-    start_time = time()
-    crf = sklearn_crfsuite.CRF(algorithm='lbfgs',
-                               c1=0.1698,
-                               c2=0.0200,
-                               max_iterations=100,
-                               all_possible_states=True,
-                               all_possible_transitions=True)
-    crf.fit(X_train, y_train)
-    end_time = time()
-    print('Train is over! It takes {} s.'.format('%.2f' % (end_time - start_time)))
-
-    # 保存模型:
-    with open('mycrf.pickle', 'wb') as f:
-        pickle.dump(crf, f)
-
-
 def word2features(sent, i):
     """
     处理每句中每个字
@@ -221,25 +203,42 @@ X = [sent2features(s) for s in sentences]
 y = [sent2labels(s) for s in sentences]
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
 
-# crf = sklearn_crfsuite.CRF(
-#     algorithm='lbfgs',
-#     c1=0.1,
-#     c2=0.1,
-#     max_iterations=100,
-#     all_possible_transitions=True
-# )
-# crf.fit(X_train, y_train)
-#
 
-#
-# y_pred = crf.predict(X_test)
-# print(metrics.flat_f1_score(y_test, y_pred,
-#                             average='weighted',
-#                             labels=lll))
-#
-# print(metrics.flat_classification_report(y_test,
-#                                          y_pred,
-#                                          labels=lll))
+def train():
+    crf = sklearn_crfsuite.CRF(
+        algorithm='lbfgs',
+        c1=0.1,
+        c2=0.1,
+        max_iterations=100,
+        all_possible_transitions=True
+    )
+    crf.fit(X_train, y_train)
+    y_pred = crf.predict(X_test)
+    print(metrics.flat_f1_score(y_test, y_pred,
+                                average='weighted',
+                                labels=lll))
+
+    print(metrics.flat_classification_report(y_test,
+                                             y_pred,
+                                             labels=lll))
+
+
+def train_and_save():
+    print('Training...')
+    start_time = time()
+    crf = sklearn_crfsuite.CRF(algorithm='lbfgs',
+                               c1=0.1698,
+                               c2=0.0200,
+                               max_iterations=100,
+                               all_possible_states=True,
+                               all_possible_transitions=True)
+    crf.fit(X_train, y_train)
+    end_time = time()
+    print('Train is over! It takes {} s.'.format('%.2f' % (end_time - start_time)))
+
+    # 保存模型:
+    with open('mycrf.pickle', 'wb') as f:
+        pickle.dump(crf, f)
 
 
 def tune_parameters():
